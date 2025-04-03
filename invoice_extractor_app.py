@@ -1,19 +1,16 @@
-import streamlit as st
+from fastapi import FastAPI, UploadFile, File
 import fitz  # PyMuPDF
 import tiktoken
 from openai import OpenAI
+from dotenv import load_dotenv
 import json
 import re
 import os
-from dotenv import load_dotenv
 
-# ========== CONFIGURATION ==========
+# Load environment variables
 load_dotenv()
 
-
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 MODEL_NAME = "llama3-70b-8192"
 
 client = OpenAI(
@@ -21,12 +18,12 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
+app = FastAPI()
 
-# ========== TOKENIZATION ==========
+# ========== Tokenization ==========
 def tokenize_text(text, model="gpt-3.5-turbo"):
     enc = tiktoken.encoding_for_model(model)
     return enc.encode(text)
-
 
 def split_text(text, max_tokens=1500):
     words = text.split()
@@ -44,14 +41,12 @@ def split_text(text, max_tokens=1500):
         chunks.append(" ".join(chunk))
     return chunks
 
-
-# ========== PDF TEXT EXTRACTION ==========
-def extract_pdf_text(file):
-    doc = fitz.open(stream=file.read(), filetype="pdf")
+# ========== PDF ==========
+def extract_pdf_text(file_bytes):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
     return "\n".join(page.get_text() for page in doc)
 
-
-# ========== SEND TO GROQ ==========
+# ========== LLM ==========
 def ask_llm(prompt):
     response = client.chat.completions.create(
         model=MODEL_NAME,
@@ -62,8 +57,6 @@ def ask_llm(prompt):
     )
     return response.choices[0].message.content
 
-
-# ========== INVOICE FIELD PARSING ==========
 def extract_invoice_fields(text_chunk):
     prompt = f"""
 Extract the following fields from the invoice text:
@@ -92,26 +85,14 @@ Invoice text:
     except json.JSONDecodeError:
         return {"error": "Failed to parse JSON"}
 
+# ========== API Endpoint ==========
+@app.post("/extract-invoice/")
+async def extract_invoice(file: UploadFile = File(...)):
+    content = await file.read()
+    text = extract_pdf_text(content)
+    chunks = split_text(text)
+    result = extract_invoice_fields(chunks[0])
+    return result
 
-# ========== STREAMLIT UI ==========
-st.set_page_config(page_title="Invoice Extractor", layout="centered")
-st.title("📄 Invoice Field Extractor (Groq + LLaMA3)")
 
-uploaded_file = st.file_uploader("Upload a PDF invoice", type=["pdf"])
 
-if uploaded_file:
-    with st.spinner("📄 Extracting text from invoice..."):
-        text = extract_pdf_text(uploaded_file)
-        chunks = split_text(text)
-
-    st.success(f"Extracted text split into {len(chunks)} chunk(s)")
-
-    extracted_data = {}
-    for i, chunk in enumerate(chunks):
-        st.info(f"⏳ Sending chunk {i + 1} to Groq LLaMA3...")
-        result = extract_invoice_fields(chunk)
-        extracted_data.update(result)
-        break  # Stop after first meaningful chunk (for efficiency)
-
-    st.subheader("📋 Extracted Fields")
-    st.json(extracted_data)
